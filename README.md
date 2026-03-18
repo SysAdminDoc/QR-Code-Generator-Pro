@@ -15,6 +15,9 @@
 
 ---
 
+
+![Screenshot](screenshot.png)
+
 ## ✨ Features
 
 - **🎨 Visual Style Gallery** - 98 preset families with 344 style variations
