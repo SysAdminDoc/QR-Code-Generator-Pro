@@ -9,6 +9,7 @@ from PIL import Image
 from qr_core import (
     build_crypto_payload,
     build_event_payload,
+    build_gradient_config,
     build_geo_payload,
     build_mailto_payload,
     build_otp_payload,
@@ -21,8 +22,10 @@ from qr_core import (
     export_animated_qr,
     export_favicon_pack,
     export_preset,
+    export_style_grid,
     generate_batch_from_csv,
     import_preset,
+    parse_qr_payload,
     render_qr,
     render_svg,
     resolve_style,
@@ -64,6 +67,14 @@ def test_style_aliases_resolve_family_and_category_aliases():
     assert "neon-01" in aliases
     assert resolve_style("neon-03", families) == ("Neon Blue", "circle")
     assert resolve_style("Classic", families) == ("Classic", "square")
+
+
+def test_gradient_and_decoded_payload_helpers():
+    config = build_gradient_config(("#000000", "#ffffff"), "linear", 45)
+    assert config["gradient_colors"] == ["#000000", "#FFFFFF"]
+    assert config["angle"] == 45.0
+    assert parse_qr_payload("SMSTO:+15551234567:Hello")["fields"]["message"] == "Hello"
+    assert parse_qr_payload("WIFI:T:WPA;S:Office;P:secret;H:false;;")["fields"]["ssid"] == "Office"
 
 
 def test_render_and_svg_are_headless_and_vector_valid(tmp_path: Path):
@@ -116,4 +127,12 @@ def test_animation_favicon_presets_batch_and_zip(tmp_path: Path):
     assert len(outputs) == 2
     archive = zip_files(outputs, tmp_path / "batch.zip", tmp_path / "batch")
     assert archive.exists()
+
+
+def test_style_grid_emits_pickable_manifest(tmp_path: Path):
+    families = {"Classic": {"fg_color": "#000000", "bg_color": "#FFFFFF", "color_mask": "solid", "gradient_colors": None, "drawers": ["square", "circle"]}}
+    result = export_style_grid("grid", families, tmp_path / "grid", render_options={"box_size": 3})
+    assert result["contact_sheet"].exists()
+    manifest = json.loads(result["manifest"].read_text(encoding="utf-8"))
+    assert len(manifest["entries"]) == 2
 

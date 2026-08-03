@@ -105,6 +105,17 @@ def hex_to_rgb(value: str) -> Tuple[int, int, int]:
     return tuple(int(value[index:index + 2], 16) for index in (0, 2, 4))  # type: ignore[return-value]
 
 
+def build_gradient_config(colors: Sequence[str], gradient_type: str = "horizontal_gradient", angle: float = 0) -> Dict[str, Any]:
+    """Validate and normalize the editable gradient settings used by UI/API callers."""
+
+    if len(colors) < 2:
+        raise ValueError("a gradient requires at least two colors")
+    gradient_type = str(gradient_type or "horizontal_gradient").lower().replace("-", "_")
+    if gradient_type not in {"horizontal_gradient", "vertical_gradient", "radial_gradient", "square_gradient", "linear"}:
+        raise ValueError("gradient type must be horizontal, vertical, radial, square, or linear")
+    return {"color_mask": gradient_type, "gradient_colors": [normalize_color(color) for color in colors], "angle": float(angle) % 360}
+
+
 def _slug(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
 
@@ -156,6 +167,14 @@ def build_vcard_payload(contact: Mapping[str, Any]) -> str:
     address = _mapping_value(contact, "address")
     if address:
         lines.append(f"ADR:;;{_escape_vcard(address)};;;;")
+    photo = _mapping_value(contact, "photo")
+    if photo:
+        photo_path = Path(str(photo))
+        if not photo_path.is_file():
+            raise ValueError("vCard photo path does not exist")
+        encoded = base64.b64encode(photo_path.read_bytes()).decode("ascii")
+        extension = photo_path.suffix.lower().lstrip(".") or "jpeg"
+        lines.append(f"PHOTO;ENCODING=b;MEDIATYPE=image/{extension}:{encoded}")
     lines.append("END:VCARD")
     return "\r\n".join(lines) + "\r\n"
 
@@ -282,11 +301,15 @@ def build_payload(input_type: str, value: Any, **kwargs: Any) -> str:
         return build_vcard_payload(_coerce_payload_mapping(value))
     if kind in {"wifi", "wi_fi"}:
         payload = _coerce_payload_mapping(value) if isinstance(value, (Mapping, str)) and (isinstance(value, Mapping) or str(value).lstrip().startswith("{")) else {"ssid": value}
-        return build_wifi_payload(str(_mapping_value(payload, "ssid", "name")), str(_mapping_value(payload, "password", "pass")), str(_mapping_value(payload, "auth", default="WPA")), bool(_mapping_value(payload, "hidden", default=False)))
+        hidden_value = _mapping_value(payload, "hidden", default=False)
+        hidden = hidden_value if isinstance(hidden_value, bool) else str(hidden_value).lower() in {"1", "true", "yes", "on"}
+        return build_wifi_payload(str(_mapping_value(payload, "ssid", "name")), str(_mapping_value(payload, "password", "pass")), str(_mapping_value(payload, "auth", default="WPA")), hidden)
     if kind in {"sms", "smsto"}:
-        return build_sms_payload(str(_mapping_value(_coerce_payload_mapping(value), "number", "phone") if isinstance(value, Mapping) else value), str(kwargs.get("message", "")))
+        payload = _coerce_payload_mapping(value) if isinstance(value, Mapping) else {"number": value}
+        return build_sms_payload(str(_mapping_value(payload, "number", "phone")), str(_mapping_value(payload, "message", default=kwargs.get("message", ""))))
     if kind in {"whatsapp", "whats_app"}:
-        return build_whatsapp_payload(str(_mapping_value(_coerce_payload_mapping(value), "number", "phone") if isinstance(value, Mapping) else value), str(kwargs.get("message", "")))
+        payload = _coerce_payload_mapping(value) if isinstance(value, Mapping) else {"number": value}
+        return build_whatsapp_payload(str(_mapping_value(payload, "number", "phone")), str(_mapping_value(payload, "message", default=kwargs.get("message", ""))))
     if kind in {"mailto", "email", "mail"}:
         payload = _coerce_payload_mapping(value) if isinstance(value, Mapping) else {"email": value}
         return build_mailto_payload(str(_mapping_value(payload, "email", "address")), str(_mapping_value(payload, "subject", default=kwargs.get("subject", ""))), str(_mapping_value(payload, "body", default=kwargs.get("body", ""))))
@@ -392,7 +415,12 @@ def _gradient_color(first: Tuple[int, int, int], second: Tuple[int, int, int], x
     return tuple(round(first[index] + (second[index] - first[index]) * amount) for index in range(3)) + (255,)  # type: ignore[return-value]
 
 
-def _gradient_position(kind: str, x: int, y: int, width: int, height: int) -> float:
+def _gradient_position(kind: str, x: int, y: int, width: int, height: int, angle: float = 0) -> float:
+    if kind == "linear":
+        radians = math.radians(angle)
+        nx = (x - width / 2) / max(1, width)
+        ny = (y - height / 2) / max(1, height)
+        return nx * math.cos(radians) + ny * math.sin(radians) + 0.5
     if kind == "vertical_gradient":
         return y / max(1, height - 1)
     if kind == "radial_gradient":
@@ -465,6 +493,7 @@ def _render_matrix(
     module_shape: str,
     gradient_type: Optional[str] = None,
     gradient_colors: Optional[Sequence[str]] = None,
+    gradient_angle: float = 0,
     eye_style: str = "square",
     background_pattern: Optional[Any] = None,
 ) -> Image.Image:
@@ -489,7 +518,7 @@ def _render_matrix(
                 continue
             x = (column + border) * box_size
             y = (row + border) * box_size
-            fill = _gradient_color(first, second, _gradient_position(gradient_type or "horizontal_gradient", x, y, total, total)) if gradient_colors else _rgba_color(first, False)
+            fill = _gradient_color(first, second, _gradient_position(gradient_type or "horizontal_gradient", x, y, total, total, gradient_angle)) if gradient_colors else _rgba_color(first, False)
             _draw_shape(draw, module_shape, (x, y, x + box_size - 1, y + box_size - 1), fill)
     if eye_style and eye_style.lower() not in {"square", "default"} and module_count >= 21:
         eye_color = _rgba_color(first, False)
@@ -585,6 +614,7 @@ def render_qr(
     error_correction: Any = "M",
     gradient_type: Optional[str] = None,
     gradient_colors: Optional[Sequence[str]] = None,
+    gradient_angle: float = 0,
     logo: Optional[Any] = None,
     logo_scale: float = 0.22,
     logo_margin: float = 0.04,
@@ -635,10 +665,10 @@ def render_qr(
         gradient_colors = tuple(normalize_color(value) for value in gradient_colors)
         gradient_type = gradient_type or "horizontal_gradient"
     ecc = ensure_logo_error_correction(error_correction, logo_scale) if logo else resolve_error_correction(error_correction)
-    use_manual = bool(logo or eye_style.lower() not in {"square", "default"} or module_shape in {"star", "heart", "dots"} or background_pattern)
+    use_manual = bool(logo or eye_style.lower() not in {"square", "default"} or module_shape in {"star", "heart", "dots"} or background_pattern or gradient_type == "linear" or gradient_angle)
     if use_manual:
         modules = _make_qr_matrix(str(data), ecc)
-        image = _render_matrix(modules, int(box_size), int(border), fg_color, bg_color, transparent, module_shape, gradient_type, gradient_colors, eye_style, background_pattern)
+        image = _render_matrix(modules, int(box_size), int(border), fg_color, bg_color, transparent, module_shape, gradient_type, gradient_colors, gradient_angle, eye_style, background_pattern)
     else:
         qr = qrcode.QRCode(version=None, error_correction=ecc, box_size=int(box_size), border=int(border))
         qr.add_data(str(data))
@@ -688,6 +718,7 @@ def render_svg(
     error_correction: Any = "M",
     gradient_type: Optional[str] = None,
     gradient_colors: Optional[Sequence[str]] = None,
+    gradient_angle: float = 0,
     logo: Optional[Any] = None,
     logo_scale: float = 0.22,
     logo_margin: float = 0.04,
@@ -725,6 +756,8 @@ def render_svg(
             gradient_parts.append(f'<radialGradient id="qr-gradient"><stop offset="0%" stop-color="{xml_escape(gradient_colors[0])}"/><stop offset="100%" stop-color="{xml_escape(gradient_colors[1] if len(gradient_colors) > 1 else gradient_colors[0])}"/></radialGradient>')
             fill = "url(#qr-gradient)"
             attrs = ""
+        elif kind == "linear":
+            attrs = f'x1="0%" y1="0%" x2="100%" y2="0%" gradientTransform="rotate({float(gradient_angle):g} .5 .5)"'
         else:
             attrs = 'x1="0%" y1="0%" x2="100%" y2="0%"'
         if not gradient_parts:
@@ -902,6 +935,113 @@ def import_preset(input_path: Any) -> Dict[str, Any]:
     return dict(document)
 
 
+def export_style_grid(
+    data: str,
+    preset_families: Mapping[str, Mapping[str, Any]],
+    output_dir: Any,
+    *,
+    render_options: Optional[Mapping[str, Any]] = None,
+    columns: int = 4,
+    thumbnail_size: int = 180,
+) -> Dict[str, Any]:
+    """Render every preset for one payload and create a pickable contact sheet."""
+
+    if columns < 1:
+        raise ValueError("columns must be positive")
+    directory = Path(output_dir)
+    directory.mkdir(parents=True, exist_ok=True)
+    options = dict(render_options or {})
+    entries: List[Dict[str, Any]] = []
+    for family, config in preset_families.items():
+        for drawer in config.get("drawers", ("square",)):
+            key = f"{family}|{drawer}"
+            filename = f"{_slug(family)}-{drawer}.png"
+            path = directory / filename
+            image = render_qr(data, style=key, preset_families=preset_families, **options)
+            image.thumbnail((thumbnail_size, thumbnail_size), _resampling())
+            save_image(image, path, "png")
+            entries.append({"style": key, "family": family, "drawer": drawer, "path": filename})
+    rows = math.ceil(len(entries) / columns)
+    label_height = 26
+    sheet = Image.new("RGB", (columns * thumbnail_size, max(1, rows) * (thumbnail_size + label_height)), "#FFFFFF")
+    draw = ImageDraw.Draw(sheet)
+    for index, entry in enumerate(entries):
+        tile = Image.open(directory / entry["path"]).convert("RGBA")
+        x = (index % columns) * thumbnail_size
+        y = (index // columns) * (thumbnail_size + label_height)
+        sheet.paste(_composite_rgb(tile, (245, 245, 245)), (x, y))
+        draw.text((x + 4, y + thumbnail_size + 5), f"{entry['family']} / {entry['drawer']}", fill="#111827", font=ImageFont.load_default())
+    sheet_path = directory / "style-grid.png"
+    sheet.save(sheet_path, "PNG")
+    manifest = {"payload": data, "entries": entries, "contact_sheet": sheet_path.name}
+    manifest_path = directory / "style-grid.json"
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    return {"entries": entries, "contact_sheet": sheet_path, "manifest": manifest_path}
+
+
+def parse_qr_payload(payload: str) -> Dict[str, Any]:
+    """Parse common decoded payloads for builder prefill and drag/drop workflows."""
+
+    text = str(payload or "").strip()
+    if text.startswith("WIFI:"):
+        fields: Dict[str, str] = {}
+        for part in re.split(r"(?<!\\);", text[5:].rstrip(";")):
+            if ":" in part:
+                key, value = part.split(":", 1)
+                fields[key.lower()] = _escape_wifi(value).replace("\\\\", "\\")
+        return {"input_type": "wifi", "fields": {"ssid": fields.get("s", ""), "password": fields.get("p", ""), "auth": fields.get("t", "WPA"), "hidden": fields.get("h", "false").lower() == "true"}}
+    if text.startswith("BEGIN:VCARD"):
+        fields = {}
+        for line in text.splitlines():
+            if ":" in line:
+                key, value = line.split(":", 1)
+                fields[key.lower().split(";", 1)[0]] = value
+        return {"input_type": "vcard", "fields": {"name": fields.get("fn", ""), "phone": fields.get("tel", ""), "email": fields.get("email", ""), "org": fields.get("org", "")}}
+    if text.startswith("SMSTO:"):
+        parts = text.split(":", 2)
+        number = parts[1] if len(parts) > 1 else ""
+        message = parts[2] if len(parts) > 2 else ""
+        return {"input_type": "sms", "fields": {"number": number, "message": message}}
+    if text.startswith("mailto:"):
+        parsed = text[7:].split("?", 1)
+        return {"input_type": "mailto", "fields": {"email": parsed[0]}}
+    if text.startswith("geo:"):
+        coordinates = text[4:].split("?", 1)[0].split(",")
+        if len(coordinates) == 2:
+            return {"input_type": "geo", "fields": {"latitude": coordinates[0], "longitude": coordinates[1]}}
+    if text.startswith("tel:"):
+        return {"input_type": "phone", "fields": {"phone": text[4:]}}
+    return {"input_type": "text", "fields": {"text": text}}
+
+
+def get_system_accent_color(default: str = "#7C3AED") -> str:
+    """Read the Windows accent when available, with a stable cross-platform fallback."""
+
+    try:
+        import platform
+        if platform.system() == "Windows":
+            import winreg
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\DWM") as key:
+                value, _ = winreg.QueryValueEx(key, "ColorizationColor")
+                return "#{:06X}".format(int(value) & 0xFFFFFF)
+    except (ImportError, OSError, TypeError, ValueError):
+        pass
+    return normalize_color(default)
+
+
+TRANSLATIONS = {
+    "en": {"generate": "Generate QR Code", "save": "Save", "preview": "Preview", "settings": "Settings", "style_gallery": "Style Gallery"},
+    "es": {"generate": "Generar código QR", "save": "Guardar", "preview": "Vista previa", "settings": "Configuración", "style_gallery": "Galería de estilos"},
+    "de": {"generate": "QR-Code erzeugen", "save": "Speichern", "preview": "Vorschau", "settings": "Einstellungen", "style_gallery": "Stilgalerie"},
+    "fr": {"generate": "Générer le code QR", "save": "Enregistrer", "preview": "Aperçu", "settings": "Paramètres", "style_gallery": "Galerie de styles"},
+}
+
+
+def translate(key: str, language: str = "en") -> str:
+    language = str(language or "en").lower().split("-", 1)[0]
+    return TRANSLATIONS.get(language, TRANSLATIONS["en"]).get(key, TRANSLATIONS["en"].get(key, key))
+
+
 def decode_qr_image(source: Any) -> List[str]:
     """Decode one or more QR symbols using OpenCV, then optional pyzbar."""
 
@@ -940,6 +1080,19 @@ def decode_qr_image(source: Any) -> List[str]:
         if cv_error:
             raise RuntimeError(f"QR decoder unavailable: {cv_error}") from cv_error
         raise RuntimeError("install opencv-python or pyzbar to decode QR images") from None
+
+
+def decode_clipboard_image() -> List[str]:
+    """Decode an image currently on the clipboard without changing it."""
+
+    try:
+        from PIL import ImageGrab
+        image = ImageGrab.grabclipboard()
+    except (ImportError, OSError) as exc:
+        raise RuntimeError("clipboard image access is unavailable on this platform") from exc
+    if not isinstance(image, Image.Image):
+        raise ValueError("the clipboard does not contain an image")
+    return decode_qr_image(image)
 
 
 def validate_round_trip(data: str, **render_options: Any) -> Dict[str, Any]:
@@ -1142,6 +1295,7 @@ def build_cli_parser() -> argparse.ArgumentParser:
     parser.add_argument("--border", type=int, default=4)
     parser.add_argument("--error-correction", default="M", choices=["L", "M", "Q", "H"])
     parser.add_argument("--gradient", help="gradient type and colors, e.g. horizontal:#7c3aed,#06b6d4")
+    parser.add_argument("--gradient-angle", type=float, default=0)
     parser.add_argument("--background-pattern", type=Path)
     parser.add_argument("--frame", dest="frame_template", choices=["scan-me", "arrow", "branded-border"])
     parser.add_argument("--frame-text", default="Scan me")
@@ -1214,7 +1368,7 @@ def cli_main(argv: Optional[Sequence[str]] = None, preset_families: Optional[Map
         value = _coerce_payload_mapping(value)
     data = build_payload(args.input_type, value)
     gradient_type, gradient_colors = _parse_gradient(args.gradient)
-    options = {"style": args.style, "preset_families": preset_families or {}, "fg_color": args.fg, "bg_color": args.bg, "transparent": not args.opaque, "module_shape": args.module_mask or args.module_shape, "box_size": args.size, "border": args.border, "error_correction": args.error_correction, "gradient_type": gradient_type, "gradient_colors": gradient_colors, "logo": args.logo, "logo_scale": args.logo_scale, "eye_style": args.eye_style, "background_pattern": args.background_pattern, "frame_template": args.frame_template, "frame_text": args.frame_text}
+    options = {"style": args.style, "preset_families": preset_families or {}, "fg_color": args.fg, "bg_color": args.bg, "transparent": not args.opaque, "module_shape": args.module_mask or args.module_shape, "box_size": args.size, "border": args.border, "error_correction": args.error_correction, "gradient_type": gradient_type, "gradient_colors": gradient_colors, "gradient_angle": args.gradient_angle, "logo": args.logo, "logo_scale": args.logo_scale, "eye_style": args.eye_style, "background_pattern": args.background_pattern, "frame_template": args.frame_template, "frame_text": args.frame_text}
     if args.animate:
         if not args.out:
             parser.error("--out is required with --animate")
@@ -1254,5 +1408,5 @@ def cli_main(argv: Optional[Sequence[str]] = None, preset_families: Optional[Map
 
 
 __all__ = [
-    "add_logo_overlay", "apply_frame_template", "build_cli_parser", "build_crypto_payload", "build_event_payload", "build_geo_payload", "build_mailto_payload", "build_otp_payload", "build_payload", "build_sms_payload", "build_style_aliases", "build_vcard_payload", "build_wifi_payload", "build_whatsapp_payload", "decode_qr_image", "decode_webcam", "ensure_logo_error_correction", "export_animated_qr", "export_eps", "export_favicon_pack", "export_pdf", "export_print_layout", "export_preset", "generate_batch_from_csv", "hex_to_rgb", "import_preset", "normalize_color", "render_qr", "render_svg", "resolve_error_correction", "resolve_style", "save_image", "validate_input_value", "validate_round_trip", "watch_folder", "zip_files",
+    "add_logo_overlay", "apply_frame_template", "build_cli_parser", "build_crypto_payload", "build_event_payload", "build_geo_payload", "build_gradient_config", "build_mailto_payload", "build_otp_payload", "build_payload", "build_sms_payload", "build_style_aliases", "build_vcard_payload", "build_wifi_payload", "build_whatsapp_payload", "decode_clipboard_image", "decode_qr_image", "decode_webcam", "ensure_logo_error_correction", "export_animated_qr", "export_eps", "export_favicon_pack", "export_pdf", "export_print_layout", "export_preset", "export_style_grid", "generate_batch_from_csv", "get_system_accent_color", "hex_to_rgb", "import_preset", "normalize_color", "parse_qr_payload", "render_qr", "render_svg", "resolve_error_correction", "resolve_style", "save_image", "translate", "validate_input_value", "validate_round_trip", "watch_folder", "zip_files",
 ]

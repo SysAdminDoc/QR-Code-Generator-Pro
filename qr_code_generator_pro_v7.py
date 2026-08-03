@@ -13,6 +13,7 @@ import sys
 import os
 import platform
 import ctypes
+import json
 import logging
 from pathlib import Path
 from datetime import datetime
@@ -165,13 +166,25 @@ from qrcode.image.styles.colormasks import (
 )
 from PIL import Image, ImageTk, ImageDraw
 from qr_core import (
+    build_gradient_config,
     build_payload,
     cli_main,
+    decode_clipboard_image,
+    decode_qr_image,
+    decode_webcam,
     export_animated_qr,
     export_favicon_pack,
+    export_print_layout as export_print_layout_pdf,
+    export_preset,
+    export_style_grid as export_style_grid_files,
+    get_system_accent_color,
+    import_preset,
+    parse_qr_payload,
     render_qr as render_core_qr,
     render_svg,
     save_image,
+    translate,
+    validate_round_trip,
 )
 
 
@@ -780,6 +793,18 @@ class QRCodeGeneratorPro:
         "Quartile (25%)": ERROR_CORRECT_Q,
         "High (30%)": ERROR_CORRECT_H
     }
+
+    PAYLOAD_FIELDS = {
+        "vcard": [("name", "Display name"), ("first_name", "First name"), ("last_name", "Last name"), ("phone", "Phone"), ("email", "Email"), ("org", "Organization"), ("title", "Title"), ("url", "Website"), ("photo", "Photo path (optional)")],
+        "wifi": [("ssid", "Network name"), ("password", "Password"), ("auth", "Auth (WPA/WEP/nopass)"), ("hidden", "Hidden network")],
+        "sms": [("number", "Phone number"), ("message", "Message")],
+        "whatsapp": [("number", "Phone number"), ("message", "Message")],
+        "mailto": [("email", "Email"), ("subject", "Subject"), ("body", "Body")],
+        "crypto": [("currency", "Currency (bitcoin/ethereum/litecoin)"), ("address", "Address"), ("amount", "Amount"), ("label", "Label"), ("message", "Message")],
+        "geo": [("latitude", "Latitude"), ("longitude", "Longitude"), ("label", "Place label")],
+        "event": [("summary", "Title"), ("start", "Start ISO date"), ("end", "End ISO date"), ("location", "Location"), ("description", "Description"), ("url", "Website")],
+        "otp": [("issuer", "Issuer"), ("account", "Account"), ("secret", "Base32 secret"), ("type", "totp or hotp"), ("algorithm", "Algorithm"), ("digits", "Digits"), ("period", "Period")],
+    }
     
     DEBOUNCE_DELAY = 250  # Faster response
     
@@ -795,6 +820,9 @@ class QRCodeGeneratorPro:
     def __init__(self, root):
         self.root = root
         self.root.title(APP_NAME)
+        self.root.option_add("*takeFocus", True)
+        self.root.option_add("*TButton.takeFocus", True)
+        self.root.option_add("*TEntry.takeFocus", True)
         
         # Fullscreen
         if platform.system() == "Windows":
@@ -809,6 +837,11 @@ class QRCodeGeneratorPro:
         
         # State
         self.current_theme = "Dark"
+        self.language = "en"
+        accent = get_system_accent_color()
+        for theme in self.APP_THEMES.values():
+            theme["accent"] = accent
+            theme["selected"] = accent
         self.qr_image = None
         self.qr_pil_image = None
         self.fg_color = "#000000"
@@ -876,6 +909,8 @@ class QRCodeGeneratorPro:
         self.root.bind("<Control-q>", lambda e: self.quit_app())
         self.root.bind("<Control-Q>", lambda e: self.quit_app())
         self.root.bind("<F11>", lambda e: self.toggle_fullscreen())
+        self.root.bind("<F6>", lambda e: self.input_entry.focus_set())
+        self.root.bind("<Control-Alt-d>", lambda e: self.decode_image_file())
         self.root.bind("<Control-plus>", lambda e: self.zoom_gallery(20))
         self.root.bind("<Control-equal>", lambda e: self.zoom_gallery(20))
         self.root.bind("<Control-minus>", lambda e: self.zoom_gallery(-20))
@@ -896,6 +931,11 @@ class QRCodeGeneratorPro:
         self.export_menu.add_command(label="EPS (print)", command=lambda: self.export_qr("eps"))
         self.export_menu.add_command(label="Animated GIF/WebP", command=self.export_animated)
         self.export_menu.add_command(label="Favicon Pack", command=self.export_favicons)
+        self.export_menu.add_command(label="Print Layout (sticker sheet)", command=self.export_print_layout)
+        self.export_menu.add_command(label="Style Grid (all presets)", command=self.export_style_grid)
+        self.export_menu.add_separator()
+        self.export_menu.add_command(label="Export Preset", command=self.export_current_preset)
+        self.export_menu.add_command(label="Import Preset", command=self.import_preset_file)
         self.file_menu.add_separator()
         self.file_menu.add_command(label="Exit", command=self.quit_app, accelerator="Ctrl+Q")
         
@@ -905,6 +945,11 @@ class QRCodeGeneratorPro:
         self.edit_menu.add_separator()
         self.edit_menu.add_command(label="Copy Image", command=self.copy_qr, accelerator="Ctrl+C")
         self.edit_menu.add_command(label="Copy Data", command=self.copy_data, accelerator="Ctrl+Shift+C")
+        self.edit_menu.add_separator()
+        self.edit_menu.add_command(label="Decode Image...", command=self.decode_image_file)
+        self.edit_menu.add_command(label="Decode Clipboard Image", command=self.decode_clipboard_image)
+        self.edit_menu.add_command(label="Decode Webcam", command=self.decode_webcam_async)
+        self.edit_menu.add_command(label="Validate Round Trip", command=self.validate_current_round_trip)
         
         self.view_menu = tk.Menu(self.menubar, tearoff=0)
         self.menubar.add_cascade(label="View", menu=self.view_menu)
@@ -1008,6 +1053,11 @@ class QRCodeGeneratorPro:
         
         hdr_right = ttk.Frame(header)
         hdr_right.pack(side=tk.RIGHT)
+        ttk.Label(hdr_right, text="Language:").pack(side=tk.LEFT, padx=(0, 5))
+        self.language_var = tk.StringVar(value=self.language)
+        language_combo = ttk.Combobox(hdr_right, textvariable=self.language_var, values=["en", "es", "de", "fr"], state="readonly", width=5)
+        language_combo.pack(side=tk.LEFT, padx=(0, 10))
+        self.language_var.trace_add("write", lambda *_: self.on_language_change())
         ttk.Label(hdr_right, text="Theme:").pack(side=tk.LEFT, padx=(0, 5))
         self.theme_var = tk.StringVar(value=self.current_theme)
         ttk.Combobox(hdr_right, textvariable=self.theme_var, values=list(self.APP_THEMES.keys()),
@@ -1034,6 +1084,11 @@ class QRCodeGeneratorPro:
         self.input_var.trace_add("write", self.on_input_change)
         self.input_entry = ttk.Entry(input_card, textvariable=self.input_var, font=("Segoe UI", 11))
         self.input_entry.pack(fill=tk.X, ipady=5, pady=(6, 0))
+        input_tools = ttk.Frame(input_card, style="Card.TFrame")
+        input_tools.pack(fill=tk.X, pady=(5, 0))
+        ttk.Button(input_tools, text="Payload Builder…", command=self.open_payload_builder).pack(side=tk.LEFT)
+        ttk.Button(input_tools, text="Gradient Editor…", command=self.open_gradient_editor).pack(side=tk.LEFT, padx=(5, 0))
+        ttk.Label(input_tools, text="Structured builders keep the encoded payload standards-compliant.", style="Card.TLabel").pack(side=tk.LEFT, padx=(8, 0))
         
         # Gallery header with controls
         gallery_hdr = ttk.Frame(left_panel)
@@ -1043,8 +1098,9 @@ class QRCodeGeneratorPro:
         hdr_left = ttk.Frame(gallery_hdr)
         hdr_left.pack(side=tk.LEFT)
         
-        ttk.Label(hdr_left, text="Style Gallery", style="Title.TLabel",
-                 font=("Segoe UI", 13, "bold")).pack(side=tk.LEFT)
+        self.gallery_title_label = ttk.Label(hdr_left, text=translate("style_gallery", self.language), style="Title.TLabel",
+                                             font=("Segoe UI", 13, "bold"))
+        self.gallery_title_label.pack(side=tk.LEFT)
         
         total_presets = sum(len(f["drawers"]) for f in PRESET_FAMILIES.values())
         ttk.Label(hdr_left, text=f"({len(PRESET_FAMILIES)} families, {total_presets} styles)",
@@ -1108,7 +1164,8 @@ class QRCodeGeneratorPro:
         preview_hdr = ttk.Frame(preview_card, style="Card.TFrame")
         preview_hdr.pack(fill=tk.X)
         
-        ttk.Label(preview_hdr, text="Preview", style="Subtitle.TLabel").pack(side=tk.LEFT)
+        self.preview_title_label = ttk.Label(preview_hdr, text=translate("preview", self.language), style="Subtitle.TLabel")
+        self.preview_title_label.pack(side=tk.LEFT)
         
         pzoom_frame = ttk.Frame(preview_hdr, style="Card.TFrame")
         pzoom_frame.pack(side=tk.RIGHT)
@@ -1134,13 +1191,13 @@ class QRCodeGeneratorPro:
         ttk.Label(preview_card, textvariable=self.img_info_var, style="Card.TLabel").pack(anchor=tk.W, pady=(0, 6))
         
         # Buttons
-        self.generate_btn = ttk.Button(preview_card, text="⚡ Generate QR Code",
+        self.generate_btn = ttk.Button(preview_card, text="⚡ " + translate("generate", self.language),
                                        style="Accent.TButton", command=self.generate_qr)
         self.generate_btn.pack(fill=tk.X, pady=(0, 5))
         
         btn_row = ttk.Frame(preview_card, style="Card.TFrame")
         btn_row.pack(fill=tk.X, pady=(0, 3))
-        self.save_btn = ttk.Button(btn_row, text="💾 Save", command=self.save_qr)
+        self.save_btn = ttk.Button(btn_row, text="💾 " + translate("save", self.language), command=self.save_qr)
         self.save_btn.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(0, 2))
         self.copy_btn = ttk.Button(btn_row, text="📋 Copy", command=self.copy_qr)
         self.copy_btn.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(2, 0))
@@ -1152,7 +1209,8 @@ class QRCodeGeneratorPro:
         settings_card = ttk.Frame(right_paned, style="Card.TFrame", padding=12)
         right_paned.add(settings_card, weight=1)
         
-        ttk.Label(settings_card, text="Settings", style="Subtitle.TLabel").pack(anchor=tk.W)
+        self.settings_title_label = ttk.Label(settings_card, text=translate("settings", self.language), style="Subtitle.TLabel")
+        self.settings_title_label.pack(anchor=tk.W)
         ttk.Separator(settings_card, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=6)
         
         settings_inner = ttk.Frame(settings_card, style="Card.TFrame")
@@ -1481,10 +1539,120 @@ class QRCodeGeneratorPro:
         h = self.preview_canvas.winfo_height() or 400
         self.preview_canvas.create_text(w//2, h//2, text="QR Code Preview\nEnter data to generate",
                                         fill=theme["fg"], font=("Segoe UI", 13), justify=tk.CENTER)
-    
+
+    def open_payload_builder(self):
+        """Open the structured payload form without requiring JSON knowledge."""
+        dlg = tk.Toplevel(self.root)
+        dlg.title("Payload Builder")
+        dlg.geometry("540x620")
+        dlg.transient(self.root)
+        theme = self.APP_THEMES[self.current_theme]
+        dlg.configure(bg=theme["frame_bg"])
+        outer = ttk.Frame(dlg, padding=14, style="Card.TFrame")
+        outer.pack(fill=tk.BOTH, expand=True)
+        ttk.Label(outer, text="Build a standards-compliant payload", style="Subtitle.TLabel").pack(anchor=tk.W)
+        ttk.Label(outer, text="Choose a type, fill the fields, then apply it to the QR input.", style="Card.TLabel").pack(anchor=tk.W, pady=(2, 8))
+        type_var = tk.StringVar(value="vcard")
+        ttk.Label(outer, text="Payload type", style="Card.TLabel").pack(anchor=tk.W)
+        type_combo = ttk.Combobox(outer, textvariable=type_var, state="readonly", values=list(self.PAYLOAD_FIELDS), width=22)
+        type_combo.pack(anchor=tk.W, pady=(2, 8))
+        form = ttk.Frame(outer, style="Card.TFrame")
+        form.pack(fill=tk.BOTH, expand=True)
+        field_vars = {}
+
+        def rebuild(*_):
+            for child in form.winfo_children():
+                child.destroy()
+            field_vars.clear()
+            for key, label in self.PAYLOAD_FIELDS[type_var.get()]:
+                if key == "hidden":
+                    var = tk.BooleanVar(value=False)
+                    ttk.Checkbutton(form, text=label, variable=var).pack(anchor=tk.W, pady=4)
+                else:
+                    var = tk.StringVar()
+                    field_vars[key] = var
+                    ttk.Label(form, text=label, style="Card.TLabel").pack(anchor=tk.W, pady=(4, 1))
+                    entry = ttk.Entry(form, textvariable=var, width=56)
+                    entry.pack(fill=tk.X)
+                    if key in {"message", "body", "description"}:
+                        entry.configure(width=56)
+
+        def apply_payload():
+            kind = type_var.get()
+            values = {key: variable.get() for key, variable in field_vars.items()}
+            for child in form.winfo_children():
+                if isinstance(child, ttk.Checkbutton):
+                    values["hidden"] = bool(child.instate(["selected"]))
+            try:
+                payload = build_payload(kind, values)
+            except (TypeError, ValueError) as exc:
+                messagebox.showerror("Invalid payload", str(exc), parent=dlg)
+                return
+            self.input_type.set("text")
+            self.input_var.set(payload)
+            self.validation_var.set(f"✓ {kind} payload")
+            self.set_status(f"Applied {kind} payload", "success")
+            dlg.destroy()
+
+        type_combo.bind("<<ComboboxSelected>>", rebuild)
+        rebuild()
+        ttk.Button(outer, text="Apply to QR input", style="Accent.TButton", command=apply_payload).pack(fill=tk.X, pady=(10, 0))
+        dlg.bind("<Escape>", lambda e: dlg.destroy())
+
+    def open_gradient_editor(self):
+        """Edit two gradient stops, type, and angle in a compact modal form."""
+        dlg = tk.Toplevel(self.root)
+        dlg.title("Gradient Editor")
+        dlg.geometry("420x310")
+        dlg.transient(self.root)
+        theme = self.APP_THEMES[self.current_theme]
+        dlg.configure(bg=theme["frame_bg"])
+        frame = ttk.Frame(dlg, padding=14, style="Card.TFrame")
+        frame.pack(fill=tk.BOTH, expand=True)
+        ttk.Label(frame, text="Custom gradient", style="Subtitle.TLabel").pack(anchor=tk.W)
+        first_var = tk.StringVar(value=(self.current_gradient_config or {}).get("gradient_colors", [self.fg_color, "#7C3AED"])[0])
+        second_var = tk.StringVar(value=(self.current_gradient_config or {}).get("gradient_colors", [self.fg_color, "#7C3AED"])[1])
+        type_var = tk.StringVar(value=(self.current_gradient_config or {}).get("color_mask", "horizontal_gradient"))
+        angle_var = tk.StringVar(value=str((self.current_gradient_config or {}).get("angle", 0)))
+        for label, variable in (("First stop", first_var), ("Second stop", second_var), ("Angle (degrees)", angle_var)):
+            row = ttk.Frame(frame, style="Card.TFrame")
+            row.pack(fill=tk.X, pady=4)
+            ttk.Label(row, text=label, style="Card.TLabel", width=18).pack(side=tk.LEFT)
+            ttk.Entry(row, textvariable=variable, width=18).pack(side=tk.LEFT)
+        row = ttk.Frame(frame, style="Card.TFrame")
+        row.pack(fill=tk.X, pady=4)
+        ttk.Label(row, text="Type", style="Card.TLabel", width=18).pack(side=tk.LEFT)
+        ttk.Combobox(row, textvariable=type_var, state="readonly", values=["horizontal_gradient", "vertical_gradient", "radial_gradient", "square_gradient", "linear"], width=20).pack(side=tk.LEFT)
+
+        def apply_gradient():
+            try:
+                self.current_gradient_config = build_gradient_config((first_var.get(), second_var.get()), type_var.get(), float(angle_var.get()))
+                self.set_status("Custom gradient applied", "success")
+                self.schedule_debounced_generate()
+                dlg.destroy()
+            except (TypeError, ValueError) as exc:
+                messagebox.showerror("Invalid gradient", str(exc), parent=dlg)
+
+        ttk.Button(frame, text="Apply gradient", style="Accent.TButton", command=apply_gradient).pack(fill=tk.X, pady=(14, 0))
+        ttk.Button(frame, text="Clear gradient", command=lambda: (setattr(self, "current_gradient_config", None), dlg.destroy(), self.schedule_debounced_generate())).pack(fill=tk.X, pady=(5, 0))
+        dlg.bind("<Escape>", lambda e: dlg.destroy())
+
     # =========================================================================
     # EVENT HANDLERS
     # =========================================================================
+    def on_language_change(self):
+        self.language = self.language_var.get()
+        self.apply_language()
+
+    def apply_language(self):
+        self.root.title(f"{translate('style_gallery', self.language)} — {APP_NAME}")
+        if hasattr(self, "gallery_title_label"):
+            self.gallery_title_label.configure(text=translate("style_gallery", self.language))
+            self.preview_title_label.configure(text=translate("preview", self.language))
+            self.settings_title_label.configure(text=translate("settings", self.language))
+            self.generate_btn.configure(text="⚡ " + translate("generate", self.language))
+            self.save_btn.configure(text="💾 " + translate("save", self.language))
+
     def on_theme_change(self, *args):
         self.current_theme = self.theme_var.get()
         self.theme_var_menu.set(self.current_theme)
@@ -1640,6 +1808,7 @@ class QRCodeGeneratorPro:
                 error_correction=self.ec_var.get(),
                 gradient_type=gc.get("color_mask") if gc else None,
                 gradient_colors=gc.get("gradient_colors") if gc else None,
+                gradient_angle=gc.get("angle", 0) if gc else 0,
             )
             
             self.last_generated_data = self._get_sig()
@@ -1760,6 +1929,7 @@ class QRCodeGeneratorPro:
             "error_correction": self.ec_var.get(),
             "gradient_type": gc.get("color_mask") if gc else None,
             "gradient_colors": gc.get("gradient_colors") if gc else None,
+            "gradient_angle": gc.get("angle", 0) if gc else 0,
         }
 
     def _save_export(self, filepath, fmt):
@@ -1817,6 +1987,156 @@ class QRCodeGeneratorPro:
             except Exception as e:
                 logger.error(f"Favicon export error: {e}")
                 self.set_status(f"Favicon export failed: {e}")
+
+    def decode_image_file(self):
+        filepath = filedialog.askopenfilename(
+            filetypes=[("Image files", "*.png *.jpg *.jpeg *.bmp *.webp *.gif"), ("All", "*.*")],
+            parent=self.root,
+        )
+        if not filepath:
+            return
+        try:
+            values = decode_qr_image(filepath)
+            if values:
+                self.input_type.set("text")
+                self.input_var.set(values[0])
+                parsed = parse_qr_payload(values[0])
+                self.set_status(f"Decoded {len(values)} QR code(s): {parsed['input_type']}", "success")
+                self._dialog("Decoded QR", "\n\n".join(values), 460, 300)
+            else:
+                self.set_status("No QR code found")
+                messagebox.showinfo("Decode", "No QR code was found in that image.", parent=self.root)
+        except (OSError, RuntimeError, ValueError) as exc:
+            self.set_status(f"Decode failed: {exc}")
+            messagebox.showerror("Decode failed", str(exc), parent=self.root)
+
+    def decode_clipboard_image(self):
+        try:
+            values = decode_clipboard_image()
+            if values:
+                self.input_type.set("text")
+                self.input_var.set(values[0])
+                self.set_status("Clipboard QR decoded", "success")
+                self._dialog("Decoded clipboard QR", "\n\n".join(values), 460, 300)
+            else:
+                self.set_status("No QR code found in clipboard image")
+        except (RuntimeError, ValueError, OSError) as exc:
+            messagebox.showerror("Clipboard decode", str(exc), parent=self.root)
+
+    def decode_webcam_async(self):
+        self.set_status("Scanning webcam...")
+        future = self.executor.submit(decode_webcam, 0, 15)
+
+        def poll():
+            if not future.done():
+                self.root.after(100, poll)
+                return
+            try:
+                values = future.result()
+                if values:
+                    self.input_type.set("text")
+                    self.input_var.set(values[0])
+                    self.set_status("Webcam QR decoded", "success")
+                    self._dialog("Webcam decode", "\n\n".join(values), 460, 300)
+                else:
+                    self.set_status("No QR code found before timeout")
+            except (RuntimeError, OSError) as exc:
+                self.set_status(f"Webcam unavailable: {exc}")
+                messagebox.showerror("Webcam decode", str(exc), parent=self.root)
+
+        self.root.after(100, poll)
+
+    def validate_current_round_trip(self):
+        if not self.is_input_valid():
+            return
+        try:
+            result = validate_round_trip(self.format_data(), **self._export_options())
+            if result["valid"]:
+                self.set_status("Round-trip decode passed", "success")
+                messagebox.showinfo("Round-trip validation", "The generated QR decoded back to the original payload.", parent=self.root)
+            else:
+                self.set_status("Round-trip decode did not match")
+                messagebox.showwarning("Round-trip validation", json.dumps(result, indent=2), parent=self.root)
+        except (RuntimeError, ValueError) as exc:
+            messagebox.showerror("Round-trip validation", str(exc), parent=self.root)
+
+    def export_print_layout(self):
+        if not self.qr_pil_image:
+            return
+        filepath = filedialog.asksaveasfilename(
+            defaultextension=".pdf",
+            filetypes=[("PDF files", "*.pdf")],
+            initialfile=f"qrcode_stickers_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
+            parent=self.root,
+        )
+        if filepath:
+            try:
+                export_print_layout_pdf(self.qr_pil_image, filepath, label_text=self.format_data()[:42])
+                self.set_status("Print layout exported", "success")
+            except (RuntimeError, OSError, ValueError) as exc:
+                self.set_status(f"Print layout failed: {exc}")
+
+    def export_style_grid(self):
+        if not self.is_input_valid():
+            return
+        directory = filedialog.askdirectory(parent=self.root, title="Choose style grid output folder")
+        if directory:
+            try:
+                options = {"box_size": int(self.size_var.get()), "border": int(self.border_var.get()), "transparent": self.transparent_var.get()}
+                export_style_grid_files(self.format_data(), PRESET_FAMILIES, directory, render_options=options)
+                self.set_status("Style grid exported", "success")
+            except (RuntimeError, OSError, ValueError) as exc:
+                self.set_status(f"Style grid failed: {exc}")
+
+    def export_current_preset(self):
+        filepath = filedialog.asksaveasfilename(
+            defaultextension=".qrpreset",
+            filetypes=[("QR preset", "*.qrpreset"), ("JSON", "*.json")],
+            initialfile="qr-style.qrpreset",
+            parent=self.root,
+        )
+        if filepath:
+            options = self._export_options()
+            options.update({"style": self.selected_preset_key, "input_type": self.input_type.get(), "data": self.input_var.get()})
+            try:
+                export_preset(filepath, self.selected_preset_key or "Custom style", options)
+                self.set_status("Preset exported", "success")
+            except (OSError, ValueError) as exc:
+                self.set_status(f"Preset export failed: {exc}")
+
+    def import_preset_file(self):
+        filepath = filedialog.askopenfilename(
+            filetypes=[("QR preset", "*.qrpreset *.json"), ("All", "*.*")],
+            parent=self.root,
+        )
+        if not filepath:
+            return
+        try:
+            options = import_preset(filepath).get("options", {})
+            if options.get("fg_color"):
+                self.fg_color = options["fg_color"]
+                self.fg_hex_var.set(self.fg_color)
+                self.fg_preview.configure(bg=self.fg_color)
+            if options.get("bg_color"):
+                self.bg_color = options["bg_color"]
+                self.bg_hex_var.set(self.bg_color)
+                self.bg_preview.configure(bg=self.bg_color)
+            if options.get("box_size") is not None:
+                self.size_var.set(int(options["box_size"]))
+            if options.get("border") is not None:
+                self.border_var.set(int(options["border"]))
+            self.transparent_var.set(bool(options.get("transparent", True)))
+            self.current_gradient_config = {
+                "color_mask": options.get("gradient_type"),
+                "gradient_colors": options.get("gradient_colors"),
+                "angle": options.get("gradient_angle", 0),
+            } if options.get("gradient_colors") else None
+            if options.get("data"):
+                self.input_var.set(options["data"])
+            self.set_status("Preset imported", "success")
+            self.schedule_debounced_generate()
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            messagebox.showerror("Preset import", str(exc), parent=self.root)
     
     def copy_qr(self):
         if not self.qr_pil_image:
