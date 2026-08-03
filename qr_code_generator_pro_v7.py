@@ -164,6 +164,15 @@ from qrcode.image.styles.colormasks import (
     HorizontalGradiantColorMask, VerticalGradiantColorMask
 )
 from PIL import Image, ImageTk, ImageDraw
+from qr_core import (
+    build_payload,
+    cli_main,
+    export_animated_qr,
+    export_favicon_pack,
+    render_qr as render_core_qr,
+    render_svg,
+    save_image,
+)
 
 
 # =============================================================================
@@ -880,6 +889,13 @@ class QRCodeGeneratorPro:
         self.file_menu.add_command(label="New", command=self.new_qr, accelerator="Ctrl+N")
         self.file_menu.add_separator()
         self.file_menu.add_command(label="Save", command=self.save_qr, accelerator="Ctrl+S")
+        self.export_menu = tk.Menu(self.file_menu, tearoff=0)
+        self.file_menu.add_cascade(label="Export", menu=self.export_menu)
+        self.export_menu.add_command(label="SVG (vector paths)", command=lambda: self.export_qr("svg"))
+        self.export_menu.add_command(label="PDF (print)", command=lambda: self.export_qr("pdf"))
+        self.export_menu.add_command(label="EPS (print)", command=lambda: self.export_qr("eps"))
+        self.export_menu.add_command(label="Animated GIF/WebP", command=self.export_animated)
+        self.export_menu.add_command(label="Favicon Pack", command=self.export_favicons)
         self.file_menu.add_separator()
         self.file_menu.add_command(label="Exit", command=self.quit_app, accelerator="Ctrl+Q")
         
@@ -960,7 +976,7 @@ class QRCodeGeneratorPro:
         self.style.configure("TCheckbutton", background=theme["frame_bg"], foreground=theme["fg"])
         self.style.configure("TScale", background=theme["bg"], troughcolor=theme["highlight"])
         
-        for menu in [self.file_menu, self.edit_menu, self.view_menu, self.help_menu, self.theme_menu]:
+        for menu in [self.file_menu, self.export_menu, self.edit_menu, self.view_menu, self.help_menu, self.theme_menu]:
             menu.configure(bg=theme["menu_bg"], fg=theme["menu_fg"],
                           activebackground=theme["accent"], activeforeground="#ffffff")
         
@@ -1205,7 +1221,7 @@ class QRCodeGeneratorPro:
         
         ttk.Label(ec_fmt_row, text="Format:", style="Card.TLabel").pack(side=tk.LEFT)
         self.format_var = tk.StringVar(value="PNG")
-        ttk.Combobox(ec_fmt_row, textvariable=self.format_var, values=["PNG", "JPEG", "BMP", "GIF", "TIFF"],
+        ttk.Combobox(ec_fmt_row, textvariable=self.format_var, values=["PNG", "JPEG", "BMP", "GIF", "TIFF", "WEBP", "PDF", "EPS", "SVG"],
                     state="readonly", width=8).pack(side=tk.LEFT)
         
         # Status bar
@@ -1600,12 +1616,7 @@ class QRCodeGeneratorPro:
         text = self.input_var.get().strip()
         if not text:
             return ""
-        if self.input_type.get() == "phone":
-            cleaned = re.sub(r'[\s\-\(\)\.]', '', text)
-            if not cleaned.startswith('+'):
-                cleaned = '+' + cleaned
-            return f"tel:{cleaned}"
-        return text
+        return build_payload(self.input_type.get(), text)
     
     # =========================================================================
     # QR GENERATION
@@ -1616,42 +1627,20 @@ class QRCodeGeneratorPro:
         
         try:
             data = self.format_data()
-            
-            qr = qrcode.QRCode(
-                version=None,
-                error_correction=self.ERROR_CORRECTION[self.ec_var.get()],
-                box_size=self.size_var.get(),
-                border=self.border_var.get()
-            )
-            qr.add_data(data)
-            qr.make(fit=True)
-            
-            drawer_key = None
-            for k, n in MODULE_DRAWER_NAMES.items():
-                if n == self.drawer_var.get():
-                    drawer_key = k
-                    break
-            drawer = MODULE_DRAWER_CLASSES.get(drawer_key, SquareModuleDrawer)()
-            
             gc = self.current_gradient_config
-            if gc and gc.get("gradient_colors"):
-                color_mask = self.get_gradient_mask(gc)
-            elif self.transparent_var.get():
-                color_mask = SolidFillColorMask(
-                    back_color=(255, 255, 255, 0),
-                    front_color=self.hex_to_rgb(self.fg_color) + (255,)
-                )
-            else:
-                color_mask = SolidFillColorMask(
-                    back_color=self.hex_to_rgb(self.bg_color),
-                    front_color=self.hex_to_rgb(self.fg_color)
-                )
-            
-            self.qr_pil_image = qr.make_image(
-                image_factory=StyledPilImage,
-                module_drawer=drawer,
-                color_mask=color_mask
-            ).convert('RGBA')
+            drawer_key = next((key for key, name in MODULE_DRAWER_NAMES.items() if name == self.drawer_var.get()), "square")
+            self.qr_pil_image = render_core_qr(
+                data,
+                fg_color=self.fg_color,
+                bg_color=self.bg_color,
+                transparent=self.transparent_var.get(),
+                module_shape=drawer_key,
+                box_size=int(self.size_var.get()),
+                border=int(self.border_var.get()),
+                error_correction=self.ec_var.get(),
+                gradient_type=gc.get("color_mask") if gc else None,
+                gradient_colors=gc.get("gradient_colors") if gc else None,
+            )
             
             self.last_generated_data = self._get_sig()
             self.update_preview()
@@ -1666,6 +1655,7 @@ class QRCodeGeneratorPro:
             
         except Exception as e:
             logger.error(f"Generation error: {e}", exc_info=True)
+            self.set_status(f"Generation failed: {e}")
     
     def get_gradient_mask(self, gc):
         colors = gc["gradient_colors"]
@@ -1739,7 +1729,7 @@ class QRCodeGeneratorPro:
             return
         
         fmt = self.format_var.get()
-        exts = {"PNG": ".png", "JPEG": ".jpg", "BMP": ".bmp", "GIF": ".gif", "TIFF": ".tiff"}
+        exts = {"PNG": ".png", "JPEG": ".jpg", "BMP": ".bmp", "GIF": ".gif", "TIFF": ".tiff", "WEBP": ".webp", "PDF": ".pdf", "EPS": ".eps", "SVG": ".svg"}
         ext = exts.get(fmt, ".png")
         
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -1752,16 +1742,81 @@ class QRCodeGeneratorPro:
         
         if filepath:
             try:
-                if fmt == "PNG":
-                    self.qr_pil_image.save(filepath, "PNG")
-                else:
-                    rgb = Image.new('RGB', self.qr_pil_image.size, (255, 255, 255))
-                    if self.qr_pil_image.mode == 'RGBA':
-                        rgb.paste(self.qr_pil_image, mask=self.qr_pil_image.split()[3])
-                    rgb.save(filepath, fmt, quality=95 if fmt == "JPEG" else None)
+                self._save_export(filepath, fmt.lower())
                 self.set_status(f"Saved: {os.path.basename(filepath)}", "success")
             except Exception as e:
                 logger.error(f"Save error: {e}")
+                self.set_status(f"Save failed: {e}")
+
+    def _export_options(self):
+        gc = self.current_gradient_config
+        return {
+            "fg_color": self.fg_color,
+            "bg_color": self.bg_color,
+            "transparent": self.transparent_var.get(),
+            "module_shape": next((key for key, name in MODULE_DRAWER_NAMES.items() if name == self.drawer_var.get()), "square"),
+            "box_size": int(self.size_var.get()),
+            "border": int(self.border_var.get()),
+            "error_correction": self.ec_var.get(),
+            "gradient_type": gc.get("color_mask") if gc else None,
+            "gradient_colors": gc.get("gradient_colors") if gc else None,
+        }
+
+    def _save_export(self, filepath, fmt):
+        if fmt == "svg":
+            svg_options = dict(self._export_options())
+            svg_options.pop("box_size", None)
+            Path(filepath).write_text(render_svg(self.format_data(), **svg_options), encoding="utf-8")
+        else:
+            save_image(self.qr_pil_image, filepath, fmt)
+
+    def export_qr(self, fmt):
+        if not self.qr_pil_image:
+            return
+        extensions = {"svg": ".svg", "pdf": ".pdf", "eps": ".eps"}
+        ext = extensions[fmt]
+        filepath = filedialog.asksaveasfilename(
+            defaultextension=ext,
+            filetypes=[(f"{fmt.upper()} files", f"*{ext}"), ("All", "*.*")],
+            initialfile=f"qrcode_{datetime.now().strftime('%Y%m%d_%H%M%S')}{ext}",
+            parent=self.root,
+        )
+        if filepath:
+            try:
+                self._save_export(filepath, fmt)
+                self.set_status(f"Exported: {os.path.basename(filepath)}", "success")
+            except Exception as e:
+                logger.error(f"Export error: {e}")
+                self.set_status(f"Export failed: {e}")
+
+    def export_animated(self):
+        if not self.qr_pil_image:
+            return
+        filepath = filedialog.asksaveasfilename(
+            defaultextension=".webp",
+            filetypes=[("Animated WebP", "*.webp"), ("Animated GIF", "*.gif")],
+            initialfile=f"qrcode_{datetime.now().strftime('%Y%m%d_%H%M%S')}.webp",
+            parent=self.root,
+        )
+        if filepath:
+            try:
+                export_animated_qr(self.format_data(), filepath, render_options=self._export_options())
+                self.set_status(f"Animated export: {os.path.basename(filepath)}", "success")
+            except Exception as e:
+                logger.error(f"Animated export error: {e}")
+                self.set_status(f"Animated export failed: {e}")
+
+    def export_favicons(self):
+        if not self.qr_pil_image:
+            return
+        directory = filedialog.askdirectory(parent=self.root, title="Choose favicon output folder")
+        if directory:
+            try:
+                export_favicon_pack(self.qr_pil_image, directory)
+                self.set_status("Favicon pack exported", "success")
+            except Exception as e:
+                logger.error(f"Favicon export error: {e}")
+                self.set_status(f"Favicon export failed: {e}")
     
     def copy_qr(self):
         if not self.qr_pil_image:
@@ -1900,10 +1955,14 @@ MIT License""", 280, 240)
 # ENTRY POINT
 # =============================================================================
 def main():
+    if len(sys.argv) > 1:
+        return cli_main(sys.argv[1:], preset_families=PRESET_FAMILIES)
     root = tk.Tk()
     app = QRCodeGeneratorPro(root)
     root.protocol("WM_DELETE_WINDOW", lambda: (logger.info("Closing"), app.executor.shutdown(wait=False), root.destroy()))
     root.mainloop()
 
 if __name__ == "__main__":
-    main()
+    result = main()
+    if isinstance(result, int):
+        raise SystemExit(result)
