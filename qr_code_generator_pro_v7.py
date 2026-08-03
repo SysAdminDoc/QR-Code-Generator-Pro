@@ -3,7 +3,7 @@
 QR Code Generator Pro
 A professional QR code maker with visual style gallery, multiple presets, and extensive customization.
 
-Version: 7.0.0
+Version: 8.0.0
 Author: QR Code Generator Pro Team
 Website: https://github.com/qrcodegenpro
 License: MIT
@@ -38,7 +38,7 @@ if platform.system() == "Windows":
 # APPLICATION METADATA
 # =============================================================================
 APP_NAME = "QR Code Generator Pro"
-APP_VERSION = "7.0.0"
+APP_VERSION = "8.0.0"
 APP_AUTHOR = "QR Code Generator Pro Team"
 APP_WEBSITE = "https://github.com/qrcodegenpro"
 APP_COPYRIGHT = f"© {datetime.now().year} {APP_AUTHOR}"
@@ -874,6 +874,7 @@ class QRCodeGeneratorPro:
         self.setup_styles()
         self.create_menu_bar()
         self.create_widgets()
+        self.enable_drag_drop()
         self.apply_theme()
         self.bind_shortcuts()
         self.update_button_states()
@@ -914,6 +915,34 @@ class QRCodeGeneratorPro:
         self.root.bind("<Control-plus>", lambda e: self.zoom_gallery(20))
         self.root.bind("<Control-equal>", lambda e: self.zoom_gallery(20))
         self.root.bind("<Control-minus>", lambda e: self.zoom_gallery(-20))
+
+    def enable_drag_drop(self):
+        """Enable native file drops when tkdnd is installed; keep a visible fallback."""
+        try:
+            from tkinterdnd2 import DND_FILES, TkinterDnD
+            TkinterDnD._require(self.root)
+            self.input_entry.drop_target_register(DND_FILES)
+            self.input_entry.dnd_bind("<<Drop>>", self.on_image_drop)
+            self.drag_drop_enabled = True
+        except (ImportError, RuntimeError, tk.TclError, AttributeError):
+            self.drag_drop_enabled = False
+
+    def on_image_drop(self, event):
+        try:
+            paths = self.root.tk.splitlist(event.data)
+            image_path = next((Path(path) for path in paths if Path(path).is_file()), None)
+            if image_path is None:
+                return
+            values = decode_qr_image(image_path)
+            if values:
+                self.input_type.set("text")
+                self.input_var.set(values[0])
+                parsed = parse_qr_payload(values[0])
+                self.set_status(f"Dropped {parsed['input_type']} QR payload", "success")
+            else:
+                self.set_status("Dropped image contains no QR code")
+        except (OSError, RuntimeError, ValueError, tk.TclError) as exc:
+            self.set_status(f"Drop decode failed: {exc}")
     
     def create_menu_bar(self):
         self.menubar = tk.Menu(self.root)
@@ -1088,7 +1117,7 @@ class QRCodeGeneratorPro:
         input_tools.pack(fill=tk.X, pady=(5, 0))
         ttk.Button(input_tools, text="Payload Builder…", command=self.open_payload_builder).pack(side=tk.LEFT)
         ttk.Button(input_tools, text="Gradient Editor…", command=self.open_gradient_editor).pack(side=tk.LEFT, padx=(5, 0))
-        ttk.Label(input_tools, text="Structured builders keep the encoded payload standards-compliant.", style="Card.TLabel").pack(side=tk.LEFT, padx=(8, 0))
+        ttk.Label(input_tools, text="Drop a QR image here or use the builder; payloads stay standards-compliant.", style="Card.TLabel").pack(side=tk.LEFT, padx=(8, 0))
         
         # Gallery header with controls
         gallery_hdr = ttk.Frame(left_panel)
@@ -2276,7 +2305,7 @@ MIT License""", 280, 240)
 # =============================================================================
 def main():
     if len(sys.argv) > 1:
-        return cli_main(sys.argv[1:], preset_families=PRESET_FAMILIES)
+        return cli_main(sys.argv[1:], preset_families=PRESET_FAMILIES, version=APP_VERSION)
     root = tk.Tk()
     app = QRCodeGeneratorPro(root)
     root.protocol("WM_DELETE_WINDOW", lambda: (logger.info("Closing"), app.executor.shutdown(wait=False), root.destroy()))

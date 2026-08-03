@@ -2,7 +2,7 @@
 
 <div align="center">
 
-![Version](https://img.shields.io/badge/version-7.0.0-blue.svg)
+![Version](https://img.shields.io/badge/version-8.0.0-blue.svg)
 ![Python](https://img.shields.io/badge/python-3.8+-green.svg)
 ![License](https://img.shields.io/badge/license-MIT-orange.svg)
 ![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)
@@ -30,7 +30,11 @@
 - **🌙 Theme Support** - Dark, Light, and Nord themes
 - **⚡ Optimized Performance** - Batch loading, caching, and smooth scrolling
 - **📋 Clipboard Support** - Copy QR image or data directly
-- **💾 Multiple Export Formats** - PNG, JPEG, BMP, GIF, TIFF
+- **💾 Multiple Export Formats** - PNG, JPEG, BMP, GIF, TIFF, WebP, SVG, PDF, EPS
+- **🧩 Structured Payload Builders** - vCard, Wi-Fi, SMS, WhatsApp, email, crypto, geo, calendar, and OTP
+- **🖼️ Logo and Print Tools** - Safe-zone logo overlays, favicon packs, sticker sheets, frames, and tiled backgrounds
+- **🧪 Offline Validation** - Image/clipboard/webcam decoding and encode/decode round-trip checks
+- **⚙️ Automation API** - Headless Python API, CLI, CSV batches, folder watch, ZIP export, and style grids
 
 ---
 
@@ -112,6 +116,18 @@ pip install pywin32
 4. **Export**
    - Click **Save** to export as file
    - Click **Copy** to copy to clipboard
+
+### Headless CLI
+
+The same renderer is available without opening the desktop window:
+
+```bash
+python qr_code_generator_pro_v7.py "https://example.com" --style neon-03 --logo icon.png --out qr.svg
+python qr_code_generator_pro_v7.py --input-type wifi --payload-json '{"ssid":"Office","password":"secret","auth":"WPA"}' --out office.png
+python qr_code_generator_pro_v7.py --batch-csv payloads.csv --column data --output-dir generated --zip generated.zip
+```
+
+Use `--help` for gradient angle, custom module masks, frame templates, PDF DPI/bleed, animated GIF/WebP, favicon, print-layout, decoder, webcam, and folder-watch options. Structured builder fields are JSON objects so scripts can produce the same payloads as the desktop forms.
 
 ### Input Types
 
@@ -247,6 +263,9 @@ Each style family includes variations with different module shapes:
 | `qrcode[pil]` | QR code generation with styled output |
 | `Pillow` | Image processing and manipulation |
 | `pywin32` (optional) | Windows clipboard support |
+| `opencv-python` (optional) | QR image and webcam decoding |
+| `reportlab` (optional) | PDF and sticker-sheet export |
+| `tkinterdnd2` (optional) | Native image drag-and-drop |
 
 ---
 
@@ -273,6 +292,12 @@ Contributions are welcome! Here's how you can help:
 ---
 
 ## 📝 Changelog
+
+### Version 8.0.0
+
+- ✨ Added headless Python and CLI generation with structured payload builders, batch/watch/ZIP workflows, and preset/style-grid automation
+- ✨ Added SVG, PDF, EPS, WebP/GIF animation, favicon-pack, print-layout, logo-overlay, frame, pattern, eye, and custom-mask exports
+- ✨ Added image, clipboard, webcam, and round-trip decoding plus gradient editing, localization, native drag-and-drop, and keyboard-focused accessibility
 
 ### Version 7.0.0
 

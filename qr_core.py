@@ -809,9 +809,9 @@ def render_svg(
         data_uri = _image_data_uri(logo_image)
         margin = max(0.25, total * logo_margin)
         panel = max(logo_image.width, logo_image.height) + margin * 2
-        x = (total - panel) / 2
-        y = (total - panel) / 2
-        parts.append(f'<rect x="{x:.3f}" y="{y:.3f}" width="{panel:.3f}" height="{panel:.3f}" rx="{min(panel / 5, margin):.3f}" fill="#FFFFFF"/>')
+        logo_x = (total - panel) / 2
+        logo_y = (total - panel) / 2
+        parts.append(f'<rect x="{logo_x:.3f}" y="{logo_y:.3f}" width="{panel:.3f}" height="{panel:.3f}" rx="{min(panel / 5, margin):.3f}" fill="#FFFFFF"/>')
         parts.append(f'<image href="{data_uri}" x="{(total - logo_image.width) / 2:.3f}" y="{(total - logo_image.height) / 2:.3f}" width="{logo_image.width}" height="{logo_image.height}" preserveAspectRatio="xMidYMid meet"/>')
     parts.append("</svg>")
     return "".join(parts).replace('></svg>', '></svg>')
@@ -951,6 +951,8 @@ def export_style_grid(
     directory = Path(output_dir)
     directory.mkdir(parents=True, exist_ok=True)
     options = dict(render_options or {})
+    options.pop("style", None)
+    options.pop("preset_families", None)
     entries: List[Dict[str, Any]] = []
     for family, config in preset_families.items():
         for drawer in config.get("drawers", ("square",)):
@@ -1327,15 +1329,19 @@ def build_cli_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def cli_main(argv: Optional[Sequence[str]] = None, preset_families: Optional[Mapping[str, Mapping[str, Any]]] = None) -> int:
+def cli_main(
+    argv: Optional[Sequence[str]] = None,
+    preset_families: Optional[Mapping[str, Mapping[str, Any]]] = None,
+    version: str = "core",
+) -> int:
     parser = build_cli_parser()
     args = parser.parse_args(argv)
     if args.version:
-        print("QR Code Generator Pro core")
+        print(f"QR Code Generator Pro {version}")
         return 0
     if args.decode:
-        for value in decode_qr_image(args.decode):
-            print(value)
+        for decoded_value in decode_qr_image(args.decode):
+            print(decoded_value)
         return 0
     if args.webcam:
         values = decode_webcam(args.camera, args.timeout)
@@ -1361,12 +1367,12 @@ def cli_main(argv: Optional[Sequence[str]] = None, preset_families: Optional[Map
         return 0
     if not args.data and not args.payload_json:
         parser.error("data is required")
-    value: Any = args.payload_json or args.data
+    payload_value: Any = args.payload_json or args.data
     if args.payload_json and Path(args.payload_json).is_file():
-        value = Path(args.payload_json).read_text(encoding="utf-8")
+        payload_value = Path(args.payload_json).read_text(encoding="utf-8")
     if args.input_type not in {"url", "text", "phone"}:
-        value = _coerce_payload_mapping(value)
-    data = build_payload(args.input_type, value)
+        payload_value = _coerce_payload_mapping(payload_value)
+    data = build_payload(args.input_type, payload_value)
     gradient_type, gradient_colors = _parse_gradient(args.gradient)
     options = {"style": args.style, "preset_families": preset_families or {}, "fg_color": args.fg, "bg_color": args.bg, "transparent": not args.opaque, "module_shape": args.module_mask or args.module_shape, "box_size": args.size, "border": args.border, "error_correction": args.error_correction, "gradient_type": gradient_type, "gradient_colors": gradient_colors, "gradient_angle": args.gradient_angle, "logo": args.logo, "logo_scale": args.logo_scale, "eye_style": args.eye_style, "background_pattern": args.background_pattern, "frame_template": args.frame_template, "frame_text": args.frame_text}
     if args.animate:
